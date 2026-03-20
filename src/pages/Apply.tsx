@@ -1,12 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Container, Typography, TextField, Button, Box, Paper, Alert, CircularProgress, MenuItem, Select, FormControl, InputLabel } from '@mui/material';
-import { useNavigate, useLocation, Link as RouterLink } from 'react-router-dom';
+import { useNavigate, Link as RouterLink } from 'react-router-dom';
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
 
 const Apply = () => {
-  const location = useLocation();
-  const [urls, setUrls] = useState(location.state?.urls || '');
+  const [urls, setUrls] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resumes, setResumes] = useState<number[]>([]);
@@ -40,7 +39,7 @@ const Apply = () => {
     setError(null);
 
     try {
-      const urlList = urls.split('\n').map((u: string) => u.trim()).filter((u: string) => u.length > 0);
+      const urlList = urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
 
       if (urlList.length === 0) {
         setError("Please enter at least one URL.");
