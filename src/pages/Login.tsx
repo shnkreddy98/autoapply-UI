@@ -26,7 +26,11 @@ function Login() {
 
   useEffect(() => {
     if (localStorage.getItem('userEmail')) {
-      navigate('/workspace', { replace: true });
+      if (localStorage.getItem('hasOnboarded')) {
+        navigate('/workspace', { replace: true });
+      } else {
+        navigate('/onboarding', { replace: true });
+      }
     }
   }, []);
 
@@ -55,8 +59,9 @@ function Login() {
     try {
       const res = await axios.post(getApiUrl('/login'), { email: siEmail.trim(), password: siPassword });
       localStorage.setItem('userEmail', res.data.email);
+      if (res.data.has_user_data) localStorage.setItem('hasOnboarded', '1');
       setUser(res.data.email, useStore.getState().resumeId ?? 0);
-      navigate('/workspace');
+      navigate(res.data.has_user_data ? '/workspace' : '/onboarding');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed');
     } finally {
@@ -94,7 +99,7 @@ function Login() {
       sessionStorage.setItem('userCountryCode', suCountryCode);
       sessionStorage.setItem('userLocation', suLocation.trim());
       setUser(res.data.email, 0);
-      navigate('/onboarding');
+      navigate('/profile');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Signup failed');
     } finally {

@@ -21,16 +21,20 @@ export const formatLocalDateTime = (dateInput: string | Date | undefined): strin
  */
 export const formatLocalDate = (dateInput: string | Date | undefined): string => {
   if (!dateInput) return '';
-  
-  if (typeof dateInput === 'string' && dateInput.length === 10) {
-    // If it's exactly YYYY-MM-DD, parse it as a local date by replacing - with /
-    // or by manually parsing to avoid UTC shift.
+
+  if (typeof dateInput === 'string' && dateInput.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
     const [year, month, day] = dateInput.split('-').map(Number);
     return new Date(year, month - 1, day).toLocaleDateString();
   }
-  
-  const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  return date.toLocaleDateString();
+
+  // Non-date strings like "Present", "Current" — return as-is
+  if (typeof dateInput === 'string') {
+    const d = new Date(dateInput);
+    if (isNaN(d.getTime())) return dateInput;
+    return d.toLocaleDateString();
+  }
+
+  return dateInput.toLocaleDateString();
 };
 
 /**

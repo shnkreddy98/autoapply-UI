@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Box, Typography, TextField, Button, Menu, MenuItem,
   CircularProgress, Alert, Select, FormControl,
-  IconButton, Tooltip,
+  IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
 import { useStore } from '../store';
@@ -33,12 +34,12 @@ const DOT_COLOR: Record<string, string> = {
   failed:    '#ef4444',
 };
 
-function StatusCell({ status }: { status: Status | undefined }) {
+function StatusCell({ status, error }: { status: Status | undefined; error?: string }) {
   const s = status ?? 'idle';
   const color = DOT_COLOR[s] ?? DOT_COLOR.idle;
   const isSquare = s === 'failed';
   const isPulse  = s === 'running' || s === 'paused';
-  return (
+  const cell = (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
       <Box
         className={isPulse ? 'status-running' : undefined}
@@ -53,6 +54,10 @@ function StatusCell({ status }: { status: Status | undefined }) {
       </Typography>
     </Box>
   );
+
+  return error
+    ? <Tooltip title={error} placement="top"><span>{cell}</span></Tooltip>
+    : cell;
 }
 
 function truncUrl(url: string) {
@@ -72,20 +77,25 @@ function getFavicon(url: string) {
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function Workspace() {
+  const userEmail     = useStore((s) => s.userEmail) ?? localStorage.getItem('userEmail') ?? '';
   const jobUrls       = useStore((s) => s.jobUrls);
   const resumeId      = useStore((s) => s.resumeId);
   const allResumeIds  = useStore((s) => s.allResumeIds);
   const tailorJobs    = useStore((s) => s.tailorJobs);
   const applySessions = useStore((s) => s.applySessions);
   const vncSessionId  = useStore((s) => s.vncSessionId);
-  const setTailorJob  = useStore((s) => s.setTailorJob);
+  const setTailorJob    = useStore((s) => s.setTailorJob);
   const setApplySession = useStore((s) => s.setApplySession);
   const setAllResumeIds = useStore((s) => s.setAllResumeIds);
-  const setResumeId   = useStore((s) => s.setResumeId);
-  const setJobUrls    = useStore((s) => s.setJobUrls);
-  const openVnc       = useStore((s) => s.openVnc);
+  const setResumeId     = useStore((s) => s.setResumeId);
+  const setJobUrls      = useStore((s) => s.setJobUrls);
+  const setWorkspace    = useStore((s) => s.setWorkspace);
+  const openVnc         = useStore((s) => s.openVnc);
+
+  const today = new Date().toISOString().slice(0, 10);
 
   const [resumeLoaded, setResumeLoaded] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(today);
   const [role,    setRole]    = useState('');
   const [company, setCompany] = useState('');
   const [pages,   setPages]   = useState(5);
@@ -93,17 +103,107 @@ export default function Workspace() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error,   setError]   = useState('');
   const [runAnchor, setRunAnchor] = useState<HTMLElement | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState('');
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tailorPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // load resumes
+  // load workspace data for a given date from DB
+  const loadDateData = useCallback(async (dateStr: string) => {
+    const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+    try {
+      const [sessionsRes, jobsRes, fetchedRes] = await Promise.all([
+        axios.get(getApiUrl(`/sessions?date=${dateStr}&email=${encodeURIComponent(email)}`)),
+        axios.get(getApiUrl(`/jobs?date=${dateStr}&email=${encodeURIComponent(email)}`)),
+        axios.get(getApiUrl(`/fetched-urls?date=${dateStr}&email=${encodeURIComponent(email)}`)),
+      ]);
+      const sessions: any[] = sessionsRes.data;
+      const jobs: any[]     = jobsRes.data;
+
+      const urlSet = new Set<string>();
+      fetchedRes.data.forEach((f: any) => urlSet.add(f.url));
+      sessions.forEach((s) => urlSet.add(s.job_url));
+      jobs.forEach((j) => urlSet.add(j.url));
+
+      const jobsMap: Record<string, any> = {};
+      jobs.forEach((j: any) => { jobsMap[j.url] = j; });
+
+      const tailorUrls = new Set<string>(
+        fetchedRes.data.filter((f: any) => f.action === 'tailor').map((f: any) => f.url)
+      );
+
+      const tailorMap: Record<string, import('../store').TailorJob> = {};
+      tailorUrls.forEach((url: string) => {
+        const job = jobsMap[url];
+        if (!job) {
+          tailorMap[url] = { status: 'queued' };
+        } else if (job.resume_path) {
+          tailorMap[url] = { status: 'done', resumePath: job.resume_path };
+        } else if (job.role === 'Processing') {
+          tailorMap[url] = { status: 'running' };
+        } else {
+          tailorMap[url] = { status: 'failed', error: job.job_match_summary || 'Tailor failed' };
+        }
+      });
+
+      // backward compat: mark done for old jobs not in jobs_fetched but with resume_path
+      jobs.forEach((j: any) => {
+        if (j.resume_path && !tailorUrls.has(j.url)) {
+          tailorMap[j.url] = { status: 'done', resumePath: j.resume_path };
+        }
+      });
+
+      const sessionMap: Record<string, import('../store').ApplySession> = {};
+      sessions.forEach((s) => {
+        sessionMap[s.job_url] = { sessionId: s.session_id, status: s.status, currentStep: s.current_step, error: s.error_message ?? undefined };
+      });
+
+      setWorkspace(Array.from(urlSet), tailorMap, sessionMap);
+    } catch { /* ignore */ }
+  }, [setWorkspace]);
+
+  // load resumes + today's workspace on mount
   useEffect(() => {
-    axios.get(getApiUrl('/list-resumes')).then((res) => {
+    axios.get(getApiUrl(`/list-resumes?email=${encodeURIComponent(userEmail)}`)).then((res) => {
       if (Array.isArray(res.data) && res.data.length > 0) {
         setAllResumeIds(res.data);
         if (!useStore.getState().resumeId) setResumeId(res.data[res.data.length - 1]);
       }
     }).catch(() => {}).finally(() => setResumeLoaded(true));
+    loadDateData(today);
   }, []);
+
+  // reload when date changes (skip initial — already loaded above)
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) { isFirstRender.current = false; return; }
+    loadDateData(selectedDate);
+  }, [selectedDate]);
+
+  // poll tailor jobs — gently merge, only mark done when resume_path appears in DB
+  useEffect(() => {
+    const hasActive = Object.values(tailorJobs).some(
+      (t) => t.status === 'queued' || t.status === 'running'
+    );
+    if (hasActive && !tailorPollingRef.current) {
+      tailorPollingRef.current = setInterval(async () => {
+        const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+        try {
+          const res = await axios.get(getApiUrl(`/jobs?date=${selectedDate}&email=${encodeURIComponent(email)}`));
+          (res.data as any[]).forEach((j) => {
+            if (j.resume_path) {
+              setTailorJob(j.url, { status: 'done', resumePath: j.resume_path });
+            }
+          });
+        } catch { /* ignore */ }
+      }, 5000);
+    }
+    if (!hasActive && tailorPollingRef.current) {
+      clearInterval(tailorPollingRef.current);
+      tailorPollingRef.current = null;
+    }
+    return () => { if (tailorPollingRef.current) { clearInterval(tailorPollingRef.current); tailorPollingRef.current = null; } };
+  }, [tailorJobs, selectedDate]);
 
   // poll sessions
   useEffect(() => {
@@ -113,10 +213,11 @@ export default function Workspace() {
     if (hasActive && !pollingRef.current) {
       pollingRef.current = setInterval(async () => {
         try {
-          const res = await axios.get(getApiUrl('/sessions'));
+          const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+          const res = await axios.get(getApiUrl(`/sessions?email=${encodeURIComponent(email)}`));
           (res.data as any[]).forEach((s) => {
             const entry = Object.entries(applySessions).find(([, v]) => v.sessionId === s.session_id);
-            if (entry) setApplySession(entry[0], { sessionId: s.session_id, status: s.status, currentStep: s.current_step });
+            if (entry) setApplySession(entry[0], { sessionId: s.session_id, status: s.status, currentStep: s.current_step, error: s.error_message ?? undefined });
           });
         } catch { /* ignore */ }
       }, 5000);
@@ -126,6 +227,11 @@ export default function Workspace() {
   }, [applySessions]);
 
   const noResume = resumeLoaded && allResumeIds.length === 0;
+  const hasOnboarded = !!localStorage.getItem('hasOnboarded');
+  const profileComplete = !noResume && hasOnboarded;
+  const profileTip = !profileComplete
+    ? `Complete your profile first: ${[noResume && 'upload a resume', !hasOnboarded && 'fill in Application Details'].filter(Boolean).join(' and ')}.`
+    : '';
 
   const handleSearch = async () => {
     if (!role.trim()) { setError('Role is required'); return; }
@@ -137,30 +243,58 @@ export default function Workspace() {
     finally { setSearchLoading(false); }
   };
 
+  const handleImport = () => {
+    const urls = importText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith('http'));
+    if (urls.length > 0) setJobUrls(urls);
+    setImportText('');
+    setImportOpen(false);
+  };
+
   const handleApplyNow = async () => {
     setRunAnchor(null);
     if (!resumeId) { setError('No resume — upload one in Profile first.'); return; }
     setActionLoading(true); setError('');
     try {
-      const res = await axios.post(getApiUrl('/applytojobs'), { urls: jobUrls, resume_id: resumeId });
+      const urls = jobUrls.filter((url) => applySessions[url]?.status !== 'completed');
+      if (urls.length === 0) { setError('All URLs already applied.'); return; }
+      const res = await axios.post(getApiUrl('/applytojobs'), { urls, resume_id: resumeId });
       res.data.sessions.forEach((s: any) => setApplySession(s.url, { sessionId: s.session_id, status: s.status }));
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to start'); }
     finally { setActionLoading(false); }
   };
 
-  const handleTailorFirst = async () => {
+  const handleTailorFirst = () => {
     setRunAnchor(null);
     if (!resumeId) { setError('No resume — upload one in Profile first.'); return; }
-    setActionLoading(true); setError('');
-    jobUrls.forEach((url) => setTailorJob(url, { status: 'running' }));
-    try {
-      const res = await axios.post(getApiUrl('/tailortojobs'), { urls: jobUrls, resume_id: resumeId });
-      const results: boolean[] = res.data;
-      jobUrls.forEach((url, i) => setTailorJob(url, { status: results[i] === true ? 'done' : 'failed' }));
-    } catch (err: any) {
-      jobUrls.forEach((url) => setTailorJob(url, { status: 'failed' }));
-      setError(err.response?.data?.detail || 'Tailoring failed');
-    } finally { setActionLoading(false); }
+    setError('');
+    const urls = jobUrls.filter((url) => tailorJobs[url]?.status !== 'done');
+    if (urls.length === 0) { setError('All URLs already tailored.'); return; }
+    urls.forEach((url) => setTailorJob(url, { status: 'queued' }));
+
+    // Fire-and-forget — backend processes async, we poll for updates
+    axios.post(getApiUrl('/tailortojobs'), { urls, resume_id: resumeId })
+      .then((res) => {
+        const results: Array<{ success: boolean; reason: string | null }> = res.data;
+        urls.forEach((url, i) =>
+          setTailorJob(url, {
+            status: results[i]?.success ? 'done' : 'failed',
+            error: results[i]?.reason ?? undefined,
+          })
+        );
+        loadDateData(selectedDate);
+      })
+      .catch(() => {
+        // Mark any still-queued/running as failed
+        const jobs = useStore.getState().tailorJobs;
+        urls.forEach((url) => {
+          if (jobs[url]?.status === 'queued' || jobs[url]?.status === 'running') {
+            setTailorJob(url, { status: 'failed' });
+          }
+        });
+      });
   };
 
   const handlePlayRow = async (url: string) => {
@@ -214,27 +348,36 @@ export default function Workspace() {
             Search
           </Button>
 
+          <Button
+            variant="outlined" size="small" onClick={() => setImportOpen(true)}
+            sx={{ height: 32, fontSize: '0.78rem', px: 1.5 }}
+          >
+            Import URLs
+          </Button>
+
           {/* divider */}
           <Box sx={{ width: 1, height: 20, background: 'var(--clay-border)', mx: 0.5 }} />
 
           {/* Apply split button */}
-          <Box sx={{ display: 'flex' }}>
-            <Button
-              variant="contained" size="small" onClick={handleApplyNow}
-              disabled={actionLoading || jobUrls.length === 0}
-              sx={{ height: 32, fontSize: '0.78rem', px: 1.5, borderRadius: '8px 0 0 8px' }}
-            >
-              {actionLoading ? <CircularProgress size={12} color="inherit" /> : 'Apply Now'}
-            </Button>
-            <Button
-              variant="contained" size="small"
-              onClick={(e) => setRunAnchor(e.currentTarget)}
-              disabled={actionLoading || jobUrls.length === 0}
-              sx={{ height: 32, minWidth: 26, px: 0, borderRadius: '0 8px 8px 0', borderLeft: '1px solid rgba(0,0,0,0.2)' }}
-            >
-              <ArrowDropDownIcon sx={{ fontSize: 18 }} />
-            </Button>
-          </Box>
+          <Tooltip title={profileTip} disableHoverListener={profileComplete}>
+            <Box sx={{ display: 'flex' }}>
+              <Button
+                variant="contained" size="small" onClick={handleApplyNow}
+                disabled={actionLoading || jobUrls.length === 0 || !profileComplete}
+                sx={{ height: 32, fontSize: '0.78rem', px: 1.5, borderRadius: '8px 0 0 8px' }}
+              >
+                {actionLoading ? <CircularProgress size={12} color="inherit" /> : 'Apply Now'}
+              </Button>
+              <Button
+                variant="contained" size="small"
+                onClick={(e) => setRunAnchor(e.currentTarget)}
+                disabled={actionLoading || jobUrls.length === 0 || !profileComplete}
+                sx={{ height: 32, minWidth: 26, px: 0, borderRadius: '0 8px 8px 0', borderLeft: '1px solid rgba(0,0,0,0.2)' }}
+              >
+                <ArrowDropDownIcon sx={{ fontSize: 18 }} />
+              </Button>
+            </Box>
+          </Tooltip>
           <Menu anchorEl={runAnchor} open={!!runAnchor} onClose={() => setRunAnchor(null)}>
             <MenuItem dense onClick={handleApplyNow}>Apply Now</MenuItem>
             <MenuItem dense onClick={handleTailorFirst}>Tailor First</MenuItem>
@@ -262,6 +405,22 @@ export default function Workspace() {
               {jobUrls.length} job{jobUrls.length !== 1 ? 's' : ''}
             </Typography>
           )}
+
+          {/* date filter */}
+          <Box sx={{ ml: 'auto' }}>
+            <input
+              type="date"
+              value={selectedDate}
+              max={today}
+              onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
+              style={{
+                height: 32, padding: '0 8px', fontSize: '0.78rem',
+                background: 'var(--clay-surface-2)', color: 'var(--color-text)',
+                border: '1px solid var(--clay-border)', borderRadius: 8,
+                outline: 'none', colorScheme: 'dark', cursor: 'pointer',
+              }}
+            />
+          </Box>
         </Box>
 
         {error && (
@@ -269,9 +428,9 @@ export default function Workspace() {
             {error}
           </Alert>
         )}
-        {noResume && (
+        {!profileComplete && (
           <Alert severity="warning" sx={{ mx: 2, mt: 1, py: 0, fontSize: '0.78rem' }}>
-            No resume uploaded. Go to <a href="/profile" style={{ color: 'inherit' }}>Profile</a> first.
+            {profileTip} <a href="/profile" style={{ color: 'inherit', fontWeight: 600 }}>Go to Profile →</a>
           </Alert>
         )}
 
@@ -345,7 +504,11 @@ export default function Workspace() {
                         onError={(e: any) => { e.target.style.display = 'none'; }}
                       />
                       <Box sx={{ minWidth: 0 }}>
-                        <Typography noWrap title={url} sx={{ fontSize: '0.78rem', fontWeight: 500, color: 'text.primary', lineHeight: 1.2 }}>
+                        <Typography
+                          noWrap title={url}
+                          component="a" href={url} target="_blank" rel="noopener noreferrer"
+                          sx={{ fontSize: '0.78rem', fontWeight: 500, color: 'text.primary', lineHeight: 1.2, textDecoration: 'none', '&:hover': { color: '#6366f1', textDecoration: 'underline' } }}
+                        >
                           {host}
                         </Typography>
                         <Typography noWrap sx={{ fontSize: '0.65rem', color: 'text.secondary', lineHeight: 1.2 }}>
@@ -365,13 +528,24 @@ export default function Workspace() {
                     </Box>
 
                     {/* Tailor status */}
-                    <Box sx={{ px: 1.5 }}>
-                      <StatusCell status={tailor?.status as Status} />
+                    <Box sx={{ px: 1.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      <StatusCell status={tailor?.status as Status} error={tailor?.error} />
+                      {tailor?.resumePath && (
+                        <Tooltip title="View tailored resume" placement="top">
+                          <IconButton
+                            size="small"
+                            onClick={() => window.open(getApiUrl(`/download-resume?url=${encodeURIComponent(url)}`), '_blank')}
+                            sx={{ p: 0.25, color: '#6366f1', '&:hover': { color: '#818cf8' } }}
+                          >
+                            <DescriptionOutlinedIcon sx={{ fontSize: 13 }} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                     </Box>
 
                     {/* Apply status */}
                     <Box sx={{ px: 1.5 }}>
-                      <StatusCell status={session?.status as Status} />
+                      <StatusCell status={session?.status as Status} error={session?.error} />
                     </Box>
 
                     {/* Current step */}
@@ -450,6 +624,33 @@ export default function Workspace() {
           />
         </Box>
       </Box>
+
+      <Dialog open={importOpen} onClose={() => setImportOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ fontSize: '0.95rem', pb: 1 }}>Import Job URLs</DialogTitle>
+        <DialogContent>
+          <TextField
+            multiline rows={10} fullWidth autoFocus
+            placeholder={"https://example.com/jobs/123\nhttps://example.com/jobs/456"}
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+            sx={{ mt: 1, fontFamily: 'monospace', fontSize: '0.8rem' }}
+            inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.8rem' } }}
+          />
+          <Typography sx={{ mt: 1, fontSize: '0.72rem', color: 'text.secondary' }}>
+            One URL per line. Non-http lines are ignored.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button size="small" onClick={() => setImportOpen(false)}>Cancel</Button>
+          <Button
+            size="small" variant="contained"
+            onClick={handleImport}
+            disabled={!importText.trim()}
+          >
+            Import
+          </Button>
+        </DialogActions>
+      </Dialog>
 
     </Box>
   );

@@ -1,5 +1,8 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import { AppBar, Toolbar, Typography, Button, Box, CssBaseline } from '@mui/material';
+import { useEffect } from 'react';
+import axios from 'axios';
+import { getApiUrl } from './utils/api';
 import JobList from './pages/JobList';
 import JobChat from './pages/JobChat';
 import JobDetails from './pages/JobDetails';
@@ -22,9 +25,34 @@ function AppContent() {
 
   const handleLogout = () => {
     localStorage.removeItem('userEmail');
+    localStorage.removeItem('hasOnboarded');
     useStore.setState({ userEmail: null, resumeId: null, allResumeIds: [], jobUrls: [], tailorJobs: {}, applySessions: {} });
     navigate('/login');
   };
+
+  // Auto-logout on 401 from any endpoint except /login itself
+  useEffect(() => {
+    const id = axios.interceptors.response.use(
+      (res) => res,
+      (err) => {
+        if (err.response?.status === 401 && !err.config?.url?.includes('/login')) {
+          handleLogout();
+        }
+        return Promise.reject(err);
+      }
+    );
+    return () => axios.interceptors.response.eject(id);
+  }, []);
+
+  // Validate stored session on every app load — clears stale localStorage after container restart
+  useEffect(() => {
+    const email = localStorage.getItem('userEmail');
+    if (email) {
+      axios.get(getApiUrl(`/validate-session?email=${encodeURIComponent(email)}`)).catch(() => {
+        // 401 handled by interceptor above → handleLogout fires automatically
+      });
+    }
+  }, []);
 
   return (
     <Box sx={{ flexGrow: 1, minHeight: '100vh', background: 'var(--clay-bg)' }}>

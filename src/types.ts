@@ -7,6 +7,7 @@ export interface Job {
   jd_path: string;
   resume_id: number;
   resume_score: number;
+  resume_path?: string;
   job_match_summary: string;
   application_qnas?: Record<string, any>;
 }
@@ -191,6 +192,9 @@ export interface UserOnboarding {
   cert_job_description: boolean;
   cert_privacy_notice: boolean;
   cert_data_processing: boolean;
+
+  // Years of Experience
+  years_of_experience?: number;
 
   // Signature
   electronic_signature: string;
