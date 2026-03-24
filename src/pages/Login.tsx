@@ -25,12 +25,8 @@ function Login() {
   const setUser = useStore((s) => s.setUser);
 
   useEffect(() => {
-    if (localStorage.getItem('userEmail')) {
-      if (localStorage.getItem('hasOnboarded')) {
-        navigate('/workspace', { replace: true });
-      } else {
-        navigate('/onboarding', { replace: true });
-      }
+    if (localStorage.getItem('userEmail') && localStorage.getItem('hasOnboarded')) {
+      navigate('/workspace', { replace: true });
     }
   }, []);
 

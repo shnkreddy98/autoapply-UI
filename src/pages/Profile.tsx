@@ -3,18 +3,33 @@ import {
   Box, Typography, Button, TextField, Select, MenuItem,
   FormControl, InputLabel, Switch, FormControlLabel, Checkbox,
   CircularProgress, Alert, Snackbar, LinearProgress, Tooltip,
-  Divider,
+  Divider, IconButton, Chip, Autocomplete,
 } from '@mui/material';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
+import SearchIcon from '@mui/icons-material/Search';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import axios from 'axios';
 import type { ProfileData, UserOnboarding, EmploymentType, YesNoNA } from '../types';
 import { formatLocalDate } from '../utils/dateUtils';
 import { getApiUrl } from '../utils/api';
 
-type Section = 'resume' | 'application';
+type Section = 'resume' | 'application' | 'search-terms';
+
+interface SearchTerm {
+  id: number;
+  user_email: string;
+  query: string;
+  locations: string | null;
+  enabled: boolean;
+  created_at: string;
+}
 
 const EMPTY_FORM: UserOnboarding = {
   full_name: '', street_address: '', city: '', state: '', zip_code: '',
@@ -76,6 +91,17 @@ export default function Profile() {
   const [saving, setSaving] = useState(false);
   const [loadingForm, setLoadingForm] = useState(false);
   const [hasUserData, setHasUserData] = useState(false);
+
+  // Search terms state
+  const [terms, setTerms] = useState<SearchTerm[]>([]);
+  const [termsLoading, setTermsLoading] = useState(false);
+  const [newQuery, setNewQuery] = useState('');
+  const [sharedLocations, setSharedLocations] = useState<string[]>([]);
+  const [applyingLocations, setApplyingLocations] = useState(false);
+  const [addingTerm, setAddingTerm] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingQuery, setEditingQuery] = useState('');
+  const [runningSearch, setRunningSearch] = useState(false);
 
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false, message: '', severity: 'success',
@@ -150,8 +176,82 @@ export default function Profile() {
     finally { setLoadingForm(false); }
   }, [userEmail]);
 
+  const loadSearchTerms = useCallback(async () => {
+    setTermsLoading(true);
+    try {
+      const res = await axios.get(getApiUrl(`/search-terms?email=${encodeURIComponent(userEmail)}`));
+      const loaded = Array.isArray(res.data) ? res.data : [];
+      setTerms(loaded);
+      // Seed shared location from the first term that has locations set
+      const firstWithLoc = loaded.find((t: SearchTerm) => t.locations);
+      if (firstWithLoc) {
+        setSharedLocations(firstWithLoc.locations!.split(',').map((l: string) => l.trim()).filter(Boolean));
+      }
+    } catch { /* ignore */ }
+    finally { setTermsLoading(false); }
+  }, [userEmail]);
+
+  const handleAddTerm = async () => {
+    const q = newQuery.trim();
+    if (!q) return;
+    setAddingTerm(true);
+    try {
+      const res = await axios.post(getApiUrl('/search-terms'), { user_email: userEmail, query: q, locations: sharedLocations });
+      setTerms((prev) => [res.data, ...prev]);
+      setNewQuery('');
+      showSnack(`Added "${q}"`, 'success');
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || 'Failed to add search term';
+      showSnack(msg, 'error');
+    } finally { setAddingTerm(false); }
+  };
+
+  const handleApplyLocations = async () => {
+    setApplyingLocations(true);
+    try {
+      await axios.patch(getApiUrl('/search-terms/locations'), { user_email: userEmail, locations: sharedLocations });
+      await loadSearchTerms();
+      showSnack('Location filter applied to all searches', 'success');
+    } catch { showSnack('Failed to apply location filter', 'error'); }
+    finally { setApplyingLocations(false); }
+  };
+
+  const handleDeleteTerm = async (id: number, query: string) => {
+    try {
+      await axios.delete(getApiUrl(`/search-terms/${id}`));
+      setTerms((prev) => prev.filter((t) => t.id !== id));
+      showSnack(`Removed "${query}"`, 'success');
+    } catch { showSnack('Failed to delete search term', 'error'); }
+  };
+
+  const handleEditSave = async (term: SearchTerm) => {
+    const q = editingQuery.trim();
+    if (!q || q === term.query) { setEditingId(null); return; }
+    try {
+      // Delete old, add new (no PUT endpoint)
+      await axios.delete(getApiUrl(`/search-terms/${term.id}`));
+      const res = await axios.post(getApiUrl('/search-terms'), { user_email: userEmail, query: q, locations: sharedLocations });
+      setTerms((prev) => prev.map((t) => t.id === term.id ? res.data : t));
+      showSnack(`Updated to "${q}"`, 'success');
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || 'Failed to update search term';
+      showSnack(msg, 'error');
+      await loadSearchTerms();
+    } finally { setEditingId(null); }
+  };
+
+  const handleRunSearchNow = async () => {
+    setRunningSearch(true);
+    try {
+      await axios.post(getApiUrl('/search-jobs/run-now'));
+      showSnack('Job search triggered — results will appear within a few minutes', 'success');
+    } catch { showSnack('Failed to trigger job search', 'error'); }
+    finally { setRunningSearch(false); }
+  };
+
   useEffect(() => { loadResumes(); loadUserData(); }, []);
   useEffect(() => { if (resumeId) loadResumeDetail(resumeId); }, [resumeId]);
+  useEffect(() => { if (section === 'search-terms') loadSearchTerms(); }, [section]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
@@ -244,6 +344,13 @@ export default function Profile() {
           active={section === 'application'}
           done={hasUserData}
           onClick={() => setSection('application')}
+        />
+        <SidebarItem
+          icon={<SearchIcon sx={{ fontSize: 16 }} />}
+          label="Search Terms"
+          active={section === 'search-terms'}
+          done={terms.length > 0}
+          onClick={() => setSection('search-terms')}
         />
       </Box>
 
@@ -360,6 +467,201 @@ export default function Profile() {
                 )}
               </Box>
             )}
+          </Box>
+        )}
+
+        {/* ── SEARCH TERMS SECTION ── */}
+        {section === 'search-terms' && (
+          <Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+              <Typography variant="h6" sx={{ flex: 1, fontWeight: 600 }}>Search Terms</Typography>
+              <Tooltip title="Manually trigger the scheduled job search now">
+                <Button
+                  variant="outlined" size="small"
+                  startIcon={runningSearch ? <CircularProgress size={13} color="inherit" /> : <PlayArrowIcon sx={{ fontSize: '15px !important' }} />}
+                  onClick={handleRunSearchNow}
+                  disabled={runningSearch}
+                >
+                  {runningSearch ? 'Triggering…' : 'Run Search Now'}
+                </Button>
+              </Tooltip>
+            </Box>
+
+            <Alert severity="info" sx={{ mb: 3, fontSize: '0.8rem' }}>
+              These terms are used by the scheduler (every 6 hours) to discover new job URLs automatically.
+              Duplicate terms across users are merged — each unique query runs only once.
+            </Alert>
+
+            {/* Shared location filter */}
+            <Section title="Location Filter">
+              <Typography sx={{ fontSize: '0.78rem', color: 'text.secondary', mb: 1.5 }}>
+                This location filter is applied to <strong>all</strong> your job searches below. Leave empty for worldwide results.
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                <Autocomplete
+                  multiple freeSolo
+                  options={['United States', 'Remote', 'New York', 'San Francisco', 'San Jose', 'Seattle', 'Austin', 'Chicago']}
+                  value={sharedLocations}
+                  onChange={(_, v) => setSharedLocations(v as string[])}
+                  sx={{ flex: 1 }}
+                  renderTags={(value, getTagProps) =>
+                    value.map((option, index) => (
+                      <Chip label={option} size="small" {...getTagProps({ index })}
+                        sx={{ height: 20, fontSize: '0.72rem', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc' }}
+                      />
+                    ))
+                  }
+                  renderInput={(params) => (
+                    <TextField
+                      {...params} size="small"
+                      placeholder={sharedLocations.length === 0 ? 'e.g. United States, Remote — press Enter after each' : ''}
+                      sx={{ '& .MuiOutlinedInput-root': { background: 'var(--clay-surface-2)', fontSize: '0.82rem' } }}
+                    />
+                  )}
+                />
+                <Button
+                  variant="outlined" size="small"
+                  onClick={handleApplyLocations}
+                  disabled={applyingLocations || terms.length === 0}
+                  sx={{ height: 36, px: 2, flexShrink: 0, mt: 0.1 }}
+                >
+                  {applyingLocations ? <CircularProgress size={13} color="inherit" /> : 'Apply to all'}
+                </Button>
+              </Box>
+            </Section>
+
+            {/* Add new term */}
+            <Section title="Add Search Term">
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <TextField
+                  placeholder='e.g. data engineer'
+                  value={newQuery}
+                  onChange={(e) => setNewQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddTerm()}
+                  size="small"
+                  fullWidth
+                  disabled={addingTerm}
+                  sx={{ '& .MuiOutlinedInput-root': { background: 'var(--clay-surface-2)', fontSize: '0.85rem' } }}
+                />
+                <Button
+                  variant="contained" size="small"
+                  onClick={handleAddTerm}
+                  disabled={addingTerm || !newQuery.trim()}
+                  sx={{ height: 36, px: 2, flexShrink: 0 }}
+                >
+                  {addingTerm ? <CircularProgress size={14} color="inherit" /> : 'Add'}
+                </Button>
+              </Box>
+              {sharedLocations.length > 0 && (
+                <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', mt: 0.8 }}>
+                  Will use location filter: {sharedLocations.join(', ')}
+                </Typography>
+              )}
+            </Section>
+
+            {/* Term list */}
+            <Box sx={{ mt: 2 }}>
+              {termsLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}><CircularProgress /></Box>
+              ) : terms.length === 0 ? (
+                <Box sx={{
+                  background: 'var(--clay-surface)', border: '1px solid var(--clay-border)',
+                  borderRadius: 2, p: 3, textAlign: 'center',
+                }}>
+                  <Typography sx={{ fontSize: '0.83rem', color: 'text.secondary' }}>
+                    No search terms yet. Add one above to start automated job discovery.
+                  </Typography>
+                </Box>
+              ) : (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  {terms.map((term) => (
+                    <Box
+                      key={term.id}
+                      sx={{
+                        display: 'flex', alignItems: 'center', gap: 1,
+                        px: 1.5, py: 1,
+                        background: 'var(--clay-surface)',
+                        border: '1px solid var(--clay-border)',
+                        borderRadius: 2,
+                        '&:hover': { borderColor: 'var(--clay-border-2)' },
+                      }}
+                    >
+                      {editingId === term.id ? (
+                        <>
+                          <Box sx={{ flex: 1 }}>
+                            <TextField
+                              value={editingQuery}
+                              onChange={(e) => setEditingQuery(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Escape') setEditingId(null); }}
+                              size="small" autoFocus fullWidth
+                              sx={{ '& .MuiOutlinedInput-root': { fontSize: '0.85rem', background: 'var(--clay-surface-2)' } }}
+                            />
+                          </Box>
+                          <IconButton
+                            size="small"
+                            onClick={() => handleEditSave(term)}
+                            sx={{ p: 0.5, color: '#10b981', '&:hover': { color: '#34d399', background: 'rgba(16,185,129,0.1)' } }}
+                          >
+                            <CheckIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            onClick={() => setEditingId(null)}
+                            sx={{ p: 0.5, color: '#4a4a5c', '&:hover': { color: '#e8e8f0' } }}
+                          >
+                            <CloseIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </>
+                      ) : (
+                        <>
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography sx={{ fontSize: '0.85rem', fontFamily: 'monospace', color: '#e8e8f0' }}>
+                              {term.query}
+                            </Typography>
+                            {term.locations && (
+                              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                                {term.locations.split(',').map((l) => l.trim()).filter(Boolean).map((loc) => (
+                                  <Chip key={loc} label={loc} size="small"
+                                    sx={{ height: 17, fontSize: '0.65rem', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', border: 'none' }}
+                                  />
+                                ))}
+                              </Box>
+                            )}
+                          </Box>
+                          <Chip
+                            label={term.enabled ? 'active' : 'disabled'}
+                            size="small"
+                            sx={{
+                              height: 18, fontSize: '0.65rem',
+                              background: term.enabled ? 'rgba(16,185,129,0.15)' : 'rgba(99,102,241,0.1)',
+                              color: term.enabled ? '#10b981' : '#6366f1',
+                              border: 'none',
+                            }}
+                          />
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              setEditingId(term.id);
+                              setEditingQuery(term.query);
+                            }}
+                            sx={{ p: 0.5, color: '#4a4a5c', '&:hover': { color: '#6366f1', background: 'rgba(99,102,241,0.1)' } }}
+                          >
+                            <EditOutlinedIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            onClick={() => handleDeleteTerm(term.id, term.query)}
+                            sx={{ p: 0.5, color: '#4a4a5c', '&:hover': { color: '#ef4444', background: 'rgba(239,68,68,0.1)' } }}
+                          >
+                            <DeleteOutlineIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </>
+                      )}
+                    </Box>
+                  ))}
+                </Box>
+              )}
+            </Box>
           </Box>
         )}
 

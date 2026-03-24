@@ -12,13 +12,12 @@ import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
 import { useStore } from '../store';
+import VncPanel from '../components/VncPanel';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
-const VNC_BASE_URL = '/novnc/vnc.html';
-const VNC_W   = 580;    // right panel px
 const ROW_H   = 44;     // spreadsheet row height
-const GRID    = '36px 44px 1.8fr 100px 110px 1.2fr 48px'; // col template
+const GRID    = '36px 44px 1.8fr 100px 110px 90px 1.2fr'; // col template
 
 // ─── status helpers ───────────────────────────────────────────────────────────
 
@@ -77,7 +76,6 @@ function getFavicon(url: string) {
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function Workspace() {
-  const userEmail     = useStore((s) => s.userEmail) ?? localStorage.getItem('userEmail') ?? '';
   const jobUrls       = useStore((s) => s.jobUrls);
   const resumeId      = useStore((s) => s.resumeId);
   const allResumeIds  = useStore((s) => s.allResumeIds);
@@ -95,6 +93,7 @@ export default function Workspace() {
   const today = new Date().toISOString().slice(0, 10);
 
   const [resumeLoaded, setResumeLoaded] = useState(false);
+  const [hasUserData, setHasUserData] = useState(!!localStorage.getItem('hasOnboarded'));
   const [selectedDate, setSelectedDate] = useState(today);
   const [role,    setRole]    = useState('');
   const [company, setCompany] = useState('');
@@ -164,12 +163,21 @@ export default function Workspace() {
 
   // load resumes + today's workspace on mount
   useEffect(() => {
-    axios.get(getApiUrl(`/list-resumes?email=${encodeURIComponent(userEmail)}`)).then((res) => {
+    const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+    axios.get(getApiUrl(`/list-resumes?email=${encodeURIComponent(email)}`)).then((res) => {
       if (Array.isArray(res.data) && res.data.length > 0) {
         setAllResumeIds(res.data);
         if (!useStore.getState().resumeId) setResumeId(res.data[res.data.length - 1]);
       }
     }).catch(() => {}).finally(() => setResumeLoaded(true));
+    if (email) {
+      axios.get(getApiUrl(`/profile/completion?email=${encodeURIComponent(email)}`))
+        .then((res) => {
+          setHasUserData(res.data.has_user_data);
+          if (res.data.has_user_data) localStorage.setItem('hasOnboarded', '1');
+        })
+        .catch(() => {});
+    }
     loadDateData(today);
   }, []);
 
@@ -227,10 +235,9 @@ export default function Workspace() {
   }, [applySessions]);
 
   const noResume = resumeLoaded && allResumeIds.length === 0;
-  const hasOnboarded = !!localStorage.getItem('hasOnboarded');
-  const profileComplete = !noResume && hasOnboarded;
+  const profileComplete = !noResume && hasUserData;
   const profileTip = !profileComplete
-    ? `Complete your profile first: ${[noResume && 'upload a resume', !hasOnboarded && 'fill in Application Details'].filter(Boolean).join(' and ')}.`
+    ? `Complete your profile first: ${[noResume && 'upload a resume', !hasUserData && 'fill in Application Details'].filter(Boolean).join(' and ')}.`
     : '';
 
   const handleSearch = async () => {
@@ -306,11 +313,38 @@ export default function Workspace() {
     } catch { /* best-effort */ }
   };
 
+  const handleTailorRow = (url: string) => {
+    if (!resumeId) { setError('No resume — upload one in Profile first.'); return; }
+    setTailorJob(url, { status: 'queued' });
+    axios.post(getApiUrl('/tailortojobs'), { urls: [url], resume_id: resumeId })
+      .then((res) => {
+        const results: Array<{ success: boolean; reason: string | null }> = res.data;
+        setTailorJob(url, { status: results[0]?.success ? 'done' : 'failed', error: results[0]?.reason ?? undefined });
+        loadDateData(selectedDate);
+      })
+      .catch(() => {
+        const jobs = useStore.getState().tailorJobs;
+        if (jobs[url]?.status === 'queued' || jobs[url]?.status === 'running') {
+          setTailorJob(url, { status: 'failed' });
+        }
+      });
+  };
+
+  const handleApplyRow = async (url: string) => {
+    if (!resumeId) { setError('No resume — upload one in Profile first.'); return; }
+    setError('');
+    try {
+      const res = await axios.post(getApiUrl('/applytojobs'), { urls: [url], resume_id: resumeId });
+      res.data.sessions.forEach((s: any) => setApplySession(s.url, { sessionId: s.session_id, status: s.status }));
+    } catch (err: any) { setError(err.response?.data?.detail || 'Failed to start'); }
+  };
+
   const removeUrl = (url: string) => setJobUrls(jobUrls.filter((u) => u !== url));
 
   // ─── render ────────────────────────────────────────────────────────────────
 
   return (
+    <>
     <Box sx={{ height: 'calc(100vh - 64px)', display: 'flex', overflow: 'hidden', background: 'var(--clay-bg)' }}>
 
       {/* ── Left: table area ── */}
@@ -444,7 +478,7 @@ export default function Workspace() {
             background: 'var(--clay-surface-2)',
             borderBottom: '1px solid var(--clay-border)',
           }}>
-            {['', '#', 'Job URL', 'Tailor', 'Apply', 'Current Step', ''].map((col, i) => (
+            {['', '#', 'Job URL', 'Tailor', 'Apply', 'Browser', 'Current Step'].map((col, i) => (
               <Box key={i} sx={{ px: i === 0 ? 1 : i === 1 ? 0.5 : 1.5, overflow: 'hidden' }}>
                 <Typography sx={{
                   fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.08em',
@@ -529,7 +563,19 @@ export default function Workspace() {
 
                     {/* Tailor status */}
                     <Box sx={{ px: 1.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                      <StatusCell status={tailor?.status as Status} error={tailor?.error} />
+                      {!tailor ? (
+                        <Tooltip title="Tailor resume for this job" placement="top">
+                          <IconButton
+                            size="small"
+                            onClick={() => handleTailorRow(url)}
+                            sx={{ p: 0.25, color: '#3a3a52', '&:hover': { color: '#6366f1' } }}
+                          >
+                            <PlayArrowIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Tooltip>
+                      ) : (
+                        <StatusCell status={tailor.status as Status} error={tailor.error} />
+                      )}
                       {tailor?.resumePath && (
                         <Tooltip title="View tailored resume" placement="top">
                           <IconButton
@@ -545,7 +591,19 @@ export default function Workspace() {
 
                     {/* Apply status */}
                     <Box sx={{ px: 1.5 }}>
-                      <StatusCell status={session?.status as Status} error={session?.error} />
+                      {!session ? (
+                        <Tooltip title="Apply for this job" placement="top">
+                          <IconButton
+                            size="small"
+                            onClick={() => handleApplyRow(url)}
+                            sx={{ p: 0.25, color: '#3a3a52', '&:hover': { color: '#6366f1' } }}
+                          >
+                            <PlayArrowIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Tooltip>
+                      ) : (
+                        <StatusCell status={session.status as Status} error={session.error} />
+                      )}
                     </Box>
 
                     {/* Current step */}
@@ -555,73 +613,36 @@ export default function Workspace() {
                       </Typography>
                     </Box>
 
-                    {/* Play button */}
-                    <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-                      <Tooltip title="Open in VNC" placement="left">
-                        <span>
-                          <IconButton
-                            size="small"
-                            onClick={() => handlePlayRow(url)}
-                            disabled={!session?.sessionId}
-                            sx={{
-                              p: 0.5,
-                              color: isActive ? '#6366f1' : 'text.secondary',
-                              opacity: session?.sessionId ? 1 : 0.25,
-                              '&:hover': { color: '#6366f1', background: 'rgba(99,102,241,0.1)' },
-                            }}
-                          >
-                            <PlayArrowIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
+                    {/* Browser col */}
+                    <Box sx={{ px: 1.5, display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                      {(session?.status === 'running' || session?.status === 'paused') && (
+                        <>
+                          <Box
+                            className={session.status === 'running' ? 'status-running' : undefined}
+                            sx={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b', flexShrink: 0 }}
+                          />
+                          <Tooltip title="View browser" placement="left">
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={() => handlePlayRow(url)}
+                              sx={{
+                                height: 22, minWidth: 0, px: 1, fontSize: '0.7rem',
+                                borderColor: 'rgba(99,102,241,0.4)', color: '#6366f1',
+                                '&:hover': { borderColor: '#6366f1', background: 'rgba(99,102,241,0.08)' },
+                              }}
+                            >
+                              View
+                            </Button>
+                          </Tooltip>
+                        </>
+                      )}
                     </Box>
                   </Box>
                 );
               })
             )}
           </Box>
-        </Box>
-      </Box>
-
-      {/* ── Right: VNC Panel (always visible) ── */}
-      <Box sx={{
-        width: VNC_W, flexShrink: 0,
-        display: 'flex', flexDirection: 'column',
-        borderLeft: '1px solid var(--clay-border)',
-        background: '#0a0a0f',
-      }}>
-        {/* VNC header */}
-        <Box sx={{
-          height: 34, flexShrink: 0,
-          display: 'flex', alignItems: 'center', px: 1.5, gap: 1,
-          borderBottom: '1px solid var(--clay-border)',
-          background: 'var(--clay-surface-2)',
-        }}>
-          {vncSessionId ? (
-            <>
-              <Box
-                className="status-running"
-                sx={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--status-running)', flexShrink: 0 }}
-              />
-              <Typography sx={{ flex: 1, fontSize: '0.72rem', color: 'text.secondary', fontFamily: 'monospace' }} noWrap>
-                {vncSessionId}
-              </Typography>
-            </>
-          ) : (
-            <Typography sx={{ fontSize: '0.72rem', color: '#3a3a52', fontFamily: 'monospace' }}>
-              no session selected
-            </Typography>
-          )}
-        </Box>
-
-        {/* VNC iframe — always loaded */}
-        <Box sx={{ flex: 1, overflow: 'hidden' }}>
-          <iframe
-            key={vncSessionId ?? 'default'}
-            src={VNC_BASE_URL}
-            title="VNC"
-            style={{ width: '100%', height: '100%', border: 'none', background: '#000', display: 'block' }}
-          />
         </Box>
       </Box>
 
@@ -653,5 +674,7 @@ export default function Workspace() {
       </Dialog>
 
     </Box>
+    <VncPanel />
+    </>
   );
 }
