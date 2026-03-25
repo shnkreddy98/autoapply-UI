@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box, Typography, TextField, Button, Menu, MenuItem,
   CircularProgress, Alert, Select, FormControl,
@@ -9,6 +10,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
+import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
 import { useStore } from '../store';
@@ -17,7 +19,7 @@ import VncPanel from '../components/VncPanel';
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const ROW_H   = 44;     // spreadsheet row height
-const GRID    = '36px 44px 1.8fr 100px 110px 90px 1.2fr'; // col template
+const GRID    = '36px 44px 1fr 100px 110px 1fr 90px 48px'; // col template
 
 // ─── status helpers ───────────────────────────────────────────────────────────
 
@@ -76,6 +78,7 @@ function getFavicon(url: string) {
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function Workspace() {
+  const navigate = useNavigate();
   const jobUrls       = useStore((s) => s.jobUrls);
   const resumeId      = useStore((s) => s.resumeId);
   const allResumeIds  = useStore((s) => s.allResumeIds);
@@ -106,6 +109,7 @@ export default function Workspace() {
   const [importText, setImportText] = useState('');
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tailorPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const selectedDateRef = useRef(today);
 
   // load workspace data for a given date from DB
   const loadDateData = useCallback(async (dateStr: string) => {
@@ -157,7 +161,7 @@ export default function Workspace() {
         sessionMap[s.job_url] = { sessionId: s.session_id, status: s.status, currentStep: s.current_step, error: s.error_message ?? undefined };
       });
 
-      setWorkspace(Array.from(urlSet), tailorMap, sessionMap);
+      setWorkspace(Array.from(urlSet).reverse(), tailorMap, sessionMap);
     } catch { /* ignore */ }
   }, [setWorkspace]);
 
@@ -181,6 +185,9 @@ export default function Workspace() {
     loadDateData(today);
   }, []);
 
+  // keep selectedDateRef in sync for use inside stable polling intervals
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
+
   // reload when date changes (skip initial — already loaded above)
   const isFirstRender = useRef(true);
   useEffect(() => {
@@ -188,51 +195,43 @@ export default function Workspace() {
     loadDateData(selectedDate);
   }, [selectedDate]);
 
-  // poll tailor jobs — gently merge, only mark done when resume_path appears in DB
+  // poll tailor jobs — stable interval, reads fresh state via getState() to avoid stale closures
   useEffect(() => {
-    const hasActive = Object.values(tailorJobs).some(
-      (t) => t.status === 'queued' || t.status === 'running'
-    );
-    if (hasActive && !tailorPollingRef.current) {
-      tailorPollingRef.current = setInterval(async () => {
-        const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
-        try {
-          const res = await axios.get(getApiUrl(`/jobs?date=${selectedDate}&email=${encodeURIComponent(email)}`));
-          (res.data as any[]).forEach((j) => {
-            if (j.resume_path) {
-              setTailorJob(j.url, { status: 'done', resumePath: j.resume_path });
-            }
-          });
-        } catch { /* ignore */ }
-      }, 5000);
-    }
-    if (!hasActive && tailorPollingRef.current) {
-      clearInterval(tailorPollingRef.current);
-      tailorPollingRef.current = null;
-    }
-    return () => { if (tailorPollingRef.current) { clearInterval(tailorPollingRef.current); tailorPollingRef.current = null; } };
-  }, [tailorJobs, selectedDate]);
+    tailorPollingRef.current = setInterval(async () => {
+      const jobs = useStore.getState().tailorJobs;
+      const hasActive = Object.values(jobs).some(t => t.status === 'queued' || t.status === 'running');
+      if (!hasActive) return;
+      const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+      try {
+        const res = await axios.get(getApiUrl(`/jobs?date=${selectedDateRef.current}&email=${encodeURIComponent(email)}`));
+        (res.data as any[]).forEach((j) => {
+          if (j.resume_path) setTailorJob(j.url, { status: 'done', resumePath: j.resume_path });
+        });
+      } catch { /* ignore */ }
+    }, 5000);
+    return () => { if (tailorPollingRef.current) clearInterval(tailorPollingRef.current); };
+  }, []);
 
-  // poll sessions
+  // poll sessions — stable interval, reads fresh state via getState() to avoid stale closures
   useEffect(() => {
-    const hasActive = Object.values(applySessions).some(
-      (s) => s.status === 'queued' || s.status === 'running' || s.status === 'paused'
-    );
-    if (hasActive && !pollingRef.current) {
-      pollingRef.current = setInterval(async () => {
-        try {
-          const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
-          const res = await axios.get(getApiUrl(`/sessions?email=${encodeURIComponent(email)}`));
-          (res.data as any[]).forEach((s) => {
-            const entry = Object.entries(applySessions).find(([, v]) => v.sessionId === s.session_id);
-            if (entry) setApplySession(entry[0], { sessionId: s.session_id, status: s.status, currentStep: s.current_step, error: s.error_message ?? undefined });
-          });
-        } catch { /* ignore */ }
-      }, 5000);
-    }
-    if (!hasActive && pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
-    return () => { if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; } };
-  }, [applySessions]);
+    pollingRef.current = setInterval(async () => {
+      const sessions = useStore.getState().applySessions;
+      const hasActive = Object.values(sessions).some(
+        s => s.status === 'queued' || s.status === 'running' || s.status === 'paused'
+      );
+      if (!hasActive) return;
+      try {
+        const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
+        const res = await axios.get(getApiUrl(`/sessions?email=${encodeURIComponent(email)}`));
+        (res.data as any[]).forEach((s) => {
+          const current = useStore.getState().applySessions;
+          const entry = Object.entries(current).find(([, v]) => v.sessionId === s.session_id);
+          if (entry) setApplySession(entry[0], { sessionId: s.session_id, status: s.status, currentStep: s.current_step, error: s.error_message ?? undefined });
+        });
+      } catch { /* ignore */ }
+    }, 5000);
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+  }, []);
 
   const noResume = resumeLoaded && allResumeIds.length === 0;
   const profileComplete = !noResume && hasUserData;
@@ -245,7 +244,13 @@ export default function Workspace() {
     setSearchLoading(true); setError('');
     try {
       const res = await axios.post(getApiUrl('/search-jobs'), { role: role.trim(), company: company.trim() || undefined, pages });
-      setJobUrls(res.data as string[]);
+      const newUrls = res.data as string[];
+      const processedUrls = jobUrls.filter(
+        (u) => tailorJobs[u] !== undefined || applySessions[u] !== undefined
+      );
+      const processedSet = new Set(processedUrls);
+      const newOnly = newUrls.filter((u) => !processedSet.has(u));
+      setJobUrls([...newOnly, ...processedUrls]);
     } catch (err: any) { setError(err.response?.data?.detail || 'Search failed'); }
     finally { setSearchLoading(false); }
   };
@@ -255,7 +260,11 @@ export default function Workspace() {
       .split('\n')
       .map((s) => s.trim())
       .filter((s) => s.startsWith('http'));
-    if (urls.length > 0) setJobUrls(urls);
+    if (urls.length > 0) {
+      const existingSet = new Set(jobUrls);
+      const newOnly = urls.filter((u) => !existingSet.has(u));
+      setJobUrls([...newOnly, ...jobUrls]);
+    }
     setImportText('');
     setImportOpen(false);
   };
@@ -478,7 +487,7 @@ export default function Workspace() {
             background: 'var(--clay-surface-2)',
             borderBottom: '1px solid var(--clay-border)',
           }}>
-            {['', '#', 'Job URL', 'Tailor', 'Apply', 'Browser', 'Current Step'].map((col, i) => (
+            {['', '#', 'Job URL', 'Tailor', 'Apply', 'Current Step', 'Browser', 'Chat'].map((col, i) => (
               <Box key={i} sx={{ px: i === 0 ? 1 : i === 1 ? 0.5 : 1.5, overflow: 'hidden' }}>
                 <Typography sx={{
                   fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.08em',
@@ -637,6 +646,33 @@ export default function Workspace() {
                           </Tooltip>
                         </>
                       )}
+                    </Box>
+
+                    {/* Chat col */}
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Tooltip title="Chat about this job" placement="left">
+                        <IconButton
+                          size="small"
+                          onClick={() => navigate('/jobs/chat', {
+                            state: {
+                              job: {
+                                url,
+                                role: host,
+                                company_name: host,
+                                job_match_summary: '',
+                                resume_score: 0,
+                                date_applied: '',
+                                date_posted: '',
+                                jd_path: '',
+                                resume_id: 0,
+                              },
+                            },
+                          })}
+                          sx={{ p: 0.5, color: '#3a3a52', '&:hover': { color: '#6366f1' } }}
+                        >
+                          <ChatBubbleOutlineIcon sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </Tooltip>
                     </Box>
                   </Box>
                 );

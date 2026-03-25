@@ -123,12 +123,14 @@ const JobChat = () => {
   return (
     <Container maxWidth="lg" sx={{ mt: 4, height: '85vh', display: 'flex', flexDirection: 'column' }}>
       <Box sx={{ mb: 2, display: 'flex', alignItems: 'center' }}>
-        <IconButton onClick={() => navigate('/jobs')} sx={{ mr: 2 }}>
+        <IconButton onClick={() => navigate(-1)} sx={{ mr: 2 }}>
           <ArrowBackIcon />
         </IconButton>
         <Box>
-          <Typography variant="h5">{job.role}</Typography>
-          <Typography variant="subtitle1" color="text.secondary">{job.company_name}</Typography>
+          <Typography variant="h5">{job.role || job.url}</Typography>
+          {job.company_name && job.company_name !== job.role && (
+            <Typography variant="subtitle1" color="text.secondary">{job.company_name}</Typography>
+          )}
         </Box>
       </Box>
 
@@ -151,7 +153,7 @@ const JobChat = () => {
             <Typography variant="subtitle1">Job Assistant</Typography>
           </Box>
           
-          <Box sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: '#f5f5f5', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Box sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: 'background.default', display: 'flex', flexDirection: 'column', gap: 2 }}>
             {messages.map((msg) => (
               <Box 
                 key={msg.id} 
@@ -166,7 +168,7 @@ const JobChat = () => {
                   sx={{ 
                     p: 1.5, 
                     maxWidth: '85%', 
-                    bgcolor: msg.sender === 'user' ? 'primary.light' : 'white',
+                    bgcolor: msg.sender === 'user' ? 'primary.main' : 'background.paper',
                     color: msg.sender === 'user' ? 'white' : (msg.isError ? 'error.main' : 'text.primary'),
                     borderRadius: 2
                   }}
@@ -209,7 +211,7 @@ const JobChat = () => {
             <div ref={scrollRef} />
           </Box>
 
-          <Box sx={{ p: 2, bgcolor: 'white', borderTop: '1px solid #e0e0e0' }}>
+          <Box sx={{ p: 2, bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider' }}>
             <Box sx={{ display: 'flex', gap: 1 }}>
               <TextField 
                 fullWidth 
