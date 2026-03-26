@@ -13,6 +13,7 @@ import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
+import { toLocalISODate } from '../utils/dateUtils';
 import { useStore } from '../store';
 import VncPanel from '../components/VncPanel';
 
@@ -93,7 +94,7 @@ export default function Workspace() {
   const setWorkspace    = useStore((s) => s.setWorkspace);
   const openVnc         = useStore((s) => s.openVnc);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = toLocalISODate(new Date());
 
   const [resumeLoaded, setResumeLoaded] = useState(false);
   const [hasUserData, setHasUserData] = useState(!!localStorage.getItem('hasOnboarded'));
