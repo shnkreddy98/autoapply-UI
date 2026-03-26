@@ -117,15 +117,29 @@ export default function Workspace() {
     const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
     try {
       const [sessionsRes, jobsRes, fetchedRes] = await Promise.all([
-        axios.get(getApiUrl(`/sessions?date=${dateStr}&email=${encodeURIComponent(email)}`)),
-        axios.get(getApiUrl(`/jobs?date=${dateStr}&email=${encodeURIComponent(email)}`)),
-        axios.get(getApiUrl(`/fetched-urls?date=${dateStr}&email=${encodeURIComponent(email)}`)),
+        axios.get(getApiUrl(`/sessions?email=${encodeURIComponent(email)}`)),
+        axios.get(getApiUrl(`/jobs?email=${encodeURIComponent(email)}`)),
+        axios.get(getApiUrl(`/fetched-urls?email=${encodeURIComponent(email)}`)),
       ]);
-      const sessions: any[] = sessionsRes.data;
-      const jobs: any[]     = jobsRes.data;
+      // Filter client-side by local date to handle UTC vs local timezone mismatch
+      const sessions: any[] = (sessionsRes.data as any[]).filter(
+        (s) => toLocalISODate(s.created_at) === dateStr
+      );
+      const jobs: any[] = (jobsRes.data as any[]).filter(
+        (j) => toLocalISODate(j.date_applied) === dateStr
+      );
+
+      // date_fetched is a UTC DATE; local date may be one day behind UTC
+      // so accept both the local date and the next calendar day
+      const [fy, fm, fd] = dateStr.split('-').map(Number);
+      const nextDayDate = new Date(fy, fm - 1, fd + 1);
+      const nextDayStr = `${nextDayDate.getFullYear()}-${String(nextDayDate.getMonth() + 1).padStart(2, '0')}-${String(nextDayDate.getDate()).padStart(2, '0')}`;
+      const fetchedForDate = (fetchedRes.data as any[]).filter(
+        (f) => { const d = (f.date_fetched as string)?.slice(0, 10); return d === dateStr || d === nextDayStr; }
+      );
 
       const urlSet = new Set<string>();
-      fetchedRes.data.forEach((f: any) => urlSet.add(f.url));
+      fetchedForDate.forEach((f: any) => urlSet.add(f.url));
       sessions.forEach((s) => urlSet.add(s.job_url));
       jobs.forEach((j) => urlSet.add(j.url));
 
@@ -133,7 +147,7 @@ export default function Workspace() {
       jobs.forEach((j: any) => { jobsMap[j.url] = j; });
 
       const tailorUrls = new Set<string>(
-        fetchedRes.data.filter((f: any) => f.action === 'tailor').map((f: any) => f.url)
+        fetchedForDate.filter((f: any) => f.action === 'tailor').map((f: any) => f.url)
       );
 
       const tailorMap: Record<string, import('../store').TailorJob> = {};
@@ -204,10 +218,12 @@ export default function Workspace() {
       if (!hasActive) return;
       const email = useStore.getState().userEmail ?? localStorage.getItem('userEmail') ?? '';
       try {
-        const res = await axios.get(getApiUrl(`/jobs?date=${selectedDateRef.current}&email=${encodeURIComponent(email)}`));
-        (res.data as any[]).forEach((j) => {
-          if (j.resume_path) setTailorJob(j.url, { status: 'done', resumePath: j.resume_path });
-        });
+        const res = await axios.get(getApiUrl(`/jobs?email=${encodeURIComponent(email)}`));
+        (res.data as any[])
+          .filter((j) => toLocalISODate(j.date_applied) === selectedDateRef.current)
+          .forEach((j) => {
+            if (j.resume_path) setTailorJob(j.url, { status: 'done', resumePath: j.resume_path });
+          });
       } catch { /* ignore */ }
     }, 5000);
     return () => { if (tailorPollingRef.current) clearInterval(tailorPollingRef.current); };
